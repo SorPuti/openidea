@@ -11,6 +11,10 @@ pub(super) enum Push {
     /// The caller must schedule one plugin wake-up after releasing this lock.
     Wake,
     Queued,
+    /// This message was refused and the caller must schedule a wake-up.
+    OverflowWake,
+    /// This message was refused; a wake-up is already pending.
+    OverflowQueued,
     Closed,
 }
 
@@ -47,20 +51,22 @@ impl Inbox {
         if state.closed {
             return Push::Closed;
         }
-        if message.len() > self.max_frame
+        let overflow = message.len() > self.max_frame
             || state.messages.len() >= self.max_messages
-            || message.len() > self.max_bytes.saturating_sub(state.bytes)
-        {
+            || message.len() > self.max_bytes.saturating_sub(state.bytes);
+        if overflow {
             state.closed = true;
         } else {
             state.bytes += message.len();
             state.messages.push_back(message);
         }
-        if state.notified {
-            Push::Queued
-        } else {
-            state.notified = true;
-            Push::Wake
+        let wake = !state.notified;
+        state.notified = true;
+        match (overflow, wake) {
+            (false, true) => Push::Wake,
+            (false, false) => Push::Queued,
+            (true, true) => Push::OverflowWake,
+            (true, false) => Push::OverflowQueued,
         }
     }
 
@@ -110,12 +116,21 @@ mod tests {
         for (messages, bytes, frame) in [(1, 8, 8), (4, 1, 8), (4, 8, 1)] {
             let inbox = Inbox::new(messages, bytes, frame);
             assert_eq!(inbox.push(vec![1]), Push::Wake);
-            assert_eq!(inbox.push(vec![2, 3]), Push::Queued);
+            assert_eq!(inbox.push(vec![2, 3]), Push::OverflowQueued);
             let batch = inbox.drain(4);
             assert_eq!(batch.messages, vec![vec![1]]);
             assert!(batch.closed);
             assert_eq!(inbox.push(vec![]), Push::Closed);
         }
+    }
+
+    #[test]
+    fn oversized_first_message_requests_wakeup_and_reports_refusal() {
+        let inbox = Inbox::new(2, 8, 1);
+        assert_eq!(inbox.push(vec![1, 2]), Push::OverflowWake);
+        let batch = inbox.drain(2);
+        assert!(batch.closed);
+        assert!(batch.messages.is_empty());
     }
 
     #[test]
