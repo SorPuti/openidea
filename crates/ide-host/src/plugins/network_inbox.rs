@@ -137,6 +137,31 @@ mod tests {
     }
 
     #[test]
+    fn close_during_partial_drain_remains_visible_without_duplicate_wakeup() {
+        let inbox = Inbox::new(3, 12, 4);
+        assert_eq!(inbox.push(vec![1]), Push::Wake);
+        assert_eq!(inbox.push(vec![2]), Push::Queued);
+        let first = inbox.drain(1);
+        assert_eq!(first.messages, vec![vec![1]]);
+        assert!(first.more);
+        assert!(!inbox.close());
+        let second = inbox.drain(1);
+        assert_eq!(second.messages, vec![vec![2]]);
+        assert!(second.closed);
+        assert!(!second.more);
+        assert_eq!(inbox.push(vec![3]), Push::Closed);
+    }
+
+    #[test]
+    fn draining_releases_byte_budget_for_later_messages() {
+        let inbox = Inbox::new(2, 4, 4);
+        assert_eq!(inbox.push(vec![1, 2, 3, 4]), Push::Wake);
+        assert_eq!(inbox.drain(1).messages, vec![vec![1, 2, 3, 4]]);
+        assert_eq!(inbox.push(vec![5, 6, 7, 8]), Push::Wake);
+        assert_eq!(inbox.drain(1).messages, vec![vec![5, 6, 7, 8]]);
+    }
+
+    #[test]
     fn oversized_first_message_requests_wakeup_and_reports_refusal() {
         let inbox = Inbox::new(2, 8, 1);
         assert_eq!(inbox.push(vec![1, 2]), Push::OverflowWake);
