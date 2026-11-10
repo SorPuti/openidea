@@ -27,7 +27,7 @@ pub(super) struct Batch {
 
 #[derive(Default)]
 struct State {
-    messages: VecDeque<Vec<u8>>,
+    messages: VecDeque<Box<[u8]>>,
     bytes: usize,
     closed: bool,
     notified: bool,
@@ -58,7 +58,7 @@ impl Inbox {
             state.closed = true;
         } else {
             state.bytes += message.len();
-            state.messages.push_back(message);
+            state.messages.push_back(message.into_boxed_slice());
         }
         let wake = !state.notified;
         state.notified = true;
@@ -88,7 +88,7 @@ impl Inbox {
         assert!(limit > 0);
         let mut state = self.state.lock().unwrap();
         let count = limit.min(state.messages.len());
-        let messages: Vec<_> = state.messages.drain(..count).collect();
+        let messages: Vec<Vec<u8>> = state.messages.drain(..count).map(|message| message.into_vec()).collect();
         state.bytes -= messages.iter().map(Vec::len).sum::<usize>();
         let more = !state.messages.is_empty();
         state.notified = more;
@@ -122,6 +122,18 @@ mod tests {
             assert!(batch.closed);
             assert_eq!(inbox.push(vec![]), Push::Closed);
         }
+    }
+
+    #[test]
+    fn accepted_frame_does_not_retain_excess_capacity() {
+        let inbox = Inbox::new(2, 8, 8);
+        let mut frame = Vec::with_capacity(1024 * 1024);
+        frame.push(42);
+        assert_eq!(inbox.push(frame), Push::Wake);
+        let state = inbox.state.lock().unwrap();
+        assert_eq!(state.bytes, 1);
+        assert_eq!(state.messages[0].len(), 1);
+        assert_eq!(std::mem::size_of_val(&*state.messages[0]), 1);
     }
 
     #[test]
