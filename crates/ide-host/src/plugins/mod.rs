@@ -21,6 +21,7 @@ pub mod commit;
 mod database;
 mod dependencies;
 pub(crate) mod diagnostics;
+mod document_stream;
 pub mod endpoints;
 mod event_paths;
 mod execution;
@@ -40,8 +41,6 @@ pub mod language_features;
 mod market;
 mod mcp;
 pub mod navigation;
-// Prototype only: no public socket API is exposed yet.
-#[cfg(test)]
 mod network_inbox;
 mod points;
 mod providers;
@@ -1817,6 +1816,9 @@ impl PluginHost {
     pub fn event_kinds(&self) -> BTreeSet<EventKind> {
         let subs = self.shared.subscriptions.lock().clone();
         let mut out = BTreeSet::new();
+        if self.shared.document_stream.has_subscriptions() {
+            out.insert(EventKind::DocumentChanged);
+        }
         for p in self.plugins.read().values() {
             for kind in EventKind::ALL {
                 if Self::wants(p, kind, subs.kinds.get(p.id())) {
@@ -1850,6 +1852,11 @@ impl PluginHost {
             editors.remove(client);
         }
         drop(editors);
+        for event in &events {
+            if let WorkbenchEvent::DocumentChanged(change) = event {
+                self.shared.document_stream.publish(change);
+            }
+        }
         self.post_events(
             Some(client),
             events
@@ -1888,6 +1895,7 @@ impl PluginHost {
         for p in plugins {
             let wanted: Vec<WorkbenchEvent> = events
                 .iter()
+                .filter(|event| !matches!(event, WorkbenchEvent::WebsocketReady(ready) if ready.plugin_id != p.id()))
                 .filter(|e| Self::wants(&p, e.kind(), subs.kinds.get(p.id())))
                 .filter(|e| {
                     !matches!(e, WorkbenchEvent::FilesChanged(_))

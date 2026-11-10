@@ -847,10 +847,64 @@ impl editor::Host for StoreData {
         };
         Ok(self.host.editor_open(self.client().unwrap(), &real, selection.map(core_range)).map_err(to_wit))
     }
+
+    fn document_at(&mut self, project: Resource<ProjectRes>, path: String) -> Fallible<editor::Document> {
+        if let Err(error) = self.require(Capability::ProjectRead).and_then(|_| self.require(Capability::EditorRead)) {
+            return Ok(Err(error));
+        }
+        let root = self.table.get(&project)?.root.clone();
+        let path = match sandbox::resolve_shared_document(&root, &path) {
+            Ok(path) => path,
+            Err(error) => return Ok(Err(wit::Error::Invalid(error))),
+        };
+        Ok(match self.host.document(&path) {
+            Some((version, text)) => Ok(editor::Document { version, text }),
+            None => Err(wit::Error::NotFound(format!("{} is not open", path.display()))),
+        })
+    }
+
+    fn apply_edits_at(
+        &mut self,
+        project: Resource<ProjectRes>,
+        path: String,
+        version: u64,
+        edits: Vec<wit::TextEdit>,
+    ) -> Fallible<u64> {
+        if let Err(error) = self.require(Capability::ProjectRead).and_then(|_| self.require(Capability::EditorWrite)) {
+            return Ok(Err(error));
+        }
+        let root = self.table.get(&project)?.root.clone();
+        let path = match sandbox::resolve_shared_document(&root, &path) {
+            Ok(path) => path,
+            Err(error) => return Ok(Err(wit::Error::Invalid(error))),
+        };
+        let edits = match checked_edits(edits) {
+            Ok(edits) => edits,
+            Err(error) => return Ok(Err(error)),
+        };
+        Ok(self.host.apply_edits(None, &path, version, edits).map_err(to_wit))
+    }
 }
 
 fn core_range(r: wit::Range) -> ide_core::Range {
     ide_core::Range::new(pos(r.start), pos(r.end))
+}
+
+fn checked_edits(edits: Vec<wit::TextEdit>) -> Result<Vec<ide_core::TextEdit>, wit::Error> {
+    if edits.len() > MAX_EDITS {
+        return Err(wit::Error::Invalid(format!("more than {MAX_EDITS} edits")));
+    }
+    let total: usize = edits.iter().map(|edit| edit.text.len()).sum();
+    if total > crate::runtime::MAX_TEXT * 8 {
+        return Err(wit::Error::Invalid("edits too large".into()));
+    }
+    Ok(edits
+        .into_iter()
+        .map(|edit| ide_core::TextEdit {
+            range: ide_core::Range::new(pos(edit.range.start), pos(edit.range.end)),
+            new_text: edit.text,
+        })
+        .collect())
 }
 impl StoreData {
     fn decoration_path(&self, path: &str) -> Result<PathBuf, wit::Error> {
@@ -934,21 +988,11 @@ impl editor::HostTextEditor for StoreData {
         if let Err(e) = self.require(Capability::EditorWrite) {
             return Ok(Err(e));
         }
-        if edits.len() > MAX_EDITS {
-            return Ok(Err(wit::Error::Invalid(format!("more than {MAX_EDITS} edits"))));
-        }
-        let total: usize = edits.iter().map(|e| e.text.len()).sum();
-        if total > crate::runtime::MAX_TEXT * 8 {
-            return Ok(Err(wit::Error::Invalid("edits too large".into())));
-        }
         let path = self.table.get(&this)?.ctx.path.clone();
-        let edits: Vec<ide_core::TextEdit> = edits
-            .into_iter()
-            .map(|e| ide_core::TextEdit {
-                range: ide_core::Range::new(pos(e.range.start), pos(e.range.end)),
-                new_text: e.text,
-            })
-            .collect();
+        let edits = match checked_edits(edits) {
+            Ok(edits) => edits,
+            Err(error) => return Ok(Err(error)),
+        };
         let client = self.invocation.client.clone();
         Ok(self.host.apply_edits(client.as_deref(), &path, version, edits).map_err(to_wit))
     }
@@ -1153,6 +1197,11 @@ impl events::Host for StoreData {
         let Some(kind) = EventKind::parse(&kind) else {
             return Ok(Err(wit::Error::Invalid(format!("no event kind {kind:?} in this OpenIDEA"))));
         };
+        if kind == EventKind::DocumentChanged {
+            return Ok(Err(wit::Error::Invalid(
+                "document-changed requires subscribe-paths with explicit project-relative globs".into(),
+            )));
+        }
         if matches!(
             kind,
             EventKind::FileClosed
@@ -1358,6 +1407,85 @@ impl net::Host for StoreData {
                 body: r.body,
             })
             .map_err(to_wit))
+    }
+
+    fn websocket_connect(&mut self, req: net::WebsocketRequest) -> Fallible<u64> {
+        let capability = match net_capability(&req.url) {
+            Ok(capability) => capability,
+            Err(error) => return Ok(Err(wit::Error::Invalid(error))),
+        };
+        if let Err(error) = self.require(capability) {
+            return Ok(Err(error));
+        }
+        if req.headers.iter().any(|header| header.value.contains("{{secret:"))
+            && let Err(error) = self.require(Capability::Secrets)
+        {
+            return Ok(Err(error));
+        }
+        let request = crate::WebSocketRequest {
+            url: req.url,
+            headers: req.headers.into_iter().map(|header| (header.name, header.value)).collect(),
+            subprotocol: req.subprotocol,
+        };
+        Ok(self.host.websocket_connect(request).map_err(to_wit))
+    }
+
+    fn websocket_send(&mut self, connection: u64, bytes: Vec<u8>) -> Fallible<()> {
+        Ok(self.host.websocket_send(connection, bytes).map_err(to_wit))
+    }
+
+    fn websocket_drain(&mut self, connection: u64, limit: u32) -> Fallible<net::WebsocketBatch> {
+        Ok(self
+            .host
+            .websocket_drain(connection, limit as usize)
+            .map(|batch| net::WebsocketBatch { messages: batch.messages, closed: batch.closed })
+            .map_err(to_wit))
+    }
+
+    fn websocket_subscribe_document(
+        &mut self,
+        connection: u64,
+        project: Resource<ProjectRes>,
+        path: String,
+    ) -> Fallible<bool> {
+        if let Err(error) = self
+            .require(Capability::ProjectRead)
+            .and_then(|_| self.require(Capability::EditorRead))
+            .and_then(|_| self.require(Capability::Events))
+        {
+            return Ok(Err(error));
+        }
+        let root = self.table.get(&project)?.root.clone();
+        let path = match sandbox::resolve_shared_document(&root, &path) {
+            Ok(path) => path,
+            Err(error) => return Ok(Err(wit::Error::Invalid(error))),
+        };
+        if self.host.document(&path).is_none() {
+            return Ok(Err(wit::Error::NotFound(format!("{} is not open", path.display()))));
+        }
+        Ok(self.host.websocket_subscribe_document(connection, &path).map_err(to_wit))
+    }
+
+    fn websocket_unsubscribe_document(
+        &mut self,
+        connection: u64,
+        project: Resource<ProjectRes>,
+        path: String,
+    ) -> Fallible<bool> {
+        if let Err(error) = self.require(Capability::ProjectRead) {
+            return Ok(Err(error));
+        }
+        let root = self.table.get(&project)?.root.clone();
+        let path = match sandbox::resolve_shared_document_identity(&root, &path) {
+            Ok(path) => path,
+            Err(error) => return Ok(Err(wit::Error::Invalid(error))),
+        };
+        Ok(self.host.websocket_unsubscribe_document(connection, &path).map_err(to_wit))
+    }
+
+    fn websocket_close(&mut self, connection: u64) -> wasmtime::Result<()> {
+        self.host.websocket_close(connection);
+        Ok(())
     }
 }
 

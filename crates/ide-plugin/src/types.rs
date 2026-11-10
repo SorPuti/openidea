@@ -104,6 +104,8 @@ pub enum Prompt {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Type)]
 #[serde(rename_all = "kebab-case")]
 pub enum EventKind {
+    DocumentChanged,
+    WebsocketReady,
     FileClosed,
     SettingsChanged,
     InputModeChanged,
@@ -121,7 +123,9 @@ pub enum EventKind {
 }
 
 impl EventKind {
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 16] = [
+        Self::DocumentChanged,
+        Self::WebsocketReady,
         Self::FileClosed,
         Self::SettingsChanged,
         Self::InputModeChanged,
@@ -140,6 +144,8 @@ impl EventKind {
 
     pub fn name(self) -> &'static str {
         match self {
+            Self::DocumentChanged => "document-changed",
+            Self::WebsocketReady => "websocket-ready",
             Self::FileClosed => "file-closed",
             Self::SettingsChanged => "settings-changed",
             Self::InputModeChanged => "input-mode-changed",
@@ -227,10 +233,53 @@ pub struct InputMode {
     pub sub: Option<String>,
 }
 
+/// One UTF-16 replacement in a locally edited editor document.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct DocumentTextChange {
+    pub from: u32,
+    pub to: u32,
+    pub insert: String,
+}
+
+/// Local changes accepted by the editor's shared document model.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentChanged {
+    pub path: String,
+    pub base_version: u64,
+    pub version: u64,
+    pub changes: Vec<DocumentTextChange>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct WebsocketReady {
+    pub plugin_id: String,
+    pub connection: u64,
+}
+
+/// A host-owned background WebSocket request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WebSocketRequest {
+    pub url: String,
+    pub headers: Vec<(String, String)>,
+    pub subprotocol: String,
+}
+
+/// Frames received from a host-owned WebSocket and its transport state.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct WebSocketBatch {
+    pub messages: Vec<Vec<u8>>,
+    pub closed: bool,
+}
+
 /// A workbench event delivered to plugins.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase", tag = "kind", content = "value")]
 pub enum WorkbenchEvent {
+    DocumentChanged(DocumentChanged),
+    WebsocketReady(WebsocketReady),
     RunExited(crate::RunExited),
     TerminalExited(crate::TerminalExited),
     ContentTabAction(crate::ContentTabAction),
@@ -251,6 +300,8 @@ pub enum WorkbenchEvent {
 impl WorkbenchEvent {
     pub fn kind(&self) -> EventKind {
         match self {
+            Self::DocumentChanged(_) => EventKind::DocumentChanged,
+            Self::WebsocketReady(_) => EventKind::WebsocketReady,
             Self::RunExited(_) => EventKind::RunExited,
             Self::TerminalExited(_) => EventKind::TerminalExited,
             Self::ContentTabAction(_) => EventKind::ContentTabAction,

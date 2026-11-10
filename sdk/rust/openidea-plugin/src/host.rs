@@ -302,6 +302,14 @@ mod imp {
     pub fn editor_open(path: &str, selection: Option<Range>) -> Result<(), Error> {
         wit::editor::open(path, selection.map(range_out)).map_err(error)
     }
+    pub fn project_document(p: &ProjectRes, path: &str) -> Result<Document, Error> {
+        wit::editor::document_at(p, path).map(|d| Document { version: d.version, text: d.text }).map_err(error)
+    }
+    pub fn project_apply_edits(p: &ProjectRes, path: &str, version: u64, edits: &[TextEdit]) -> Result<u64, Error> {
+        let edits: Vec<wit::types::TextEdit> =
+            edits.iter().map(|t| wit::types::TextEdit { range: range_out(t.range), text: t.text.clone() }).collect();
+        wit::editor::apply_edits_at(p, path, version, &edits).map_err(error)
+    }
     pub fn editor_set_selections(e: &EditorRes, ranges: &[Range]) -> Result<(), Error> {
         e.set_selections(&ranges.iter().copied().map(range_out).collect::<Vec<_>>()).map_err(error)
     }
@@ -635,6 +643,41 @@ mod imp {
                 body: r.body,
             })
             .map_err(error)
+    }
+
+    pub fn websocket_connect(req: &WebSocketRequest) -> Result<u64, Error> {
+        let request = wit::net::WebsocketRequest {
+            url: req.url.clone(),
+            headers: req
+                .headers
+                .iter()
+                .map(|(name, value)| wit::net::Header { name: name.clone(), value: value.clone() })
+                .collect(),
+            subprotocol: req.subprotocol.clone(),
+        };
+        wit::net::websocket_connect(&request).map_err(error)
+    }
+
+    pub fn websocket_send(connection: u64, bytes: &[u8]) -> Result<(), Error> {
+        wit::net::websocket_send(connection, bytes).map_err(error)
+    }
+
+    pub fn websocket_drain(connection: u64, limit: u32) -> Result<WebSocketBatch, Error> {
+        wit::net::websocket_drain(connection, limit)
+            .map(|batch| WebSocketBatch { messages: batch.messages, closed: batch.closed })
+            .map_err(error)
+    }
+
+    pub fn websocket_subscribe_document(connection: u64, project: &ProjectRes, path: &str) -> Result<bool, Error> {
+        wit::net::websocket_subscribe_document(connection, project, path).map_err(error)
+    }
+
+    pub fn websocket_unsubscribe_document(connection: u64, project: &ProjectRes, path: &str) -> Result<bool, Error> {
+        wit::net::websocket_unsubscribe_document(connection, project, path).map_err(error)
+    }
+
+    pub fn websocket_close(connection: u64) {
+        wit::net::websocket_close(connection)
     }
 
     pub fn secret_set(name: &str, value: &str) -> Result<(), Error> {
@@ -1031,6 +1074,29 @@ impl Project {
         imp::project_read_bytes(&self.inner, path)
     }
 
+    /// Current version and text of an open document in this project. This is
+    /// available from background events and needs `project.read` and
+    /// `editor.read`.
+    pub fn document(&self, path: &str) -> Result<Document, Error> {
+        imp::project_document(&self.inner, path)
+    }
+
+    /// Applies one versioned, undoable change to an open project document.
+    /// A concurrent local or remote edit returns [`Error::Stale`] without
+    /// changing the document. Needs `project.read` and `editor.write`.
+    pub fn apply_document_edits(&self, path: &str, version: u64, edits: &[TextEdit]) -> Result<u64, Error> {
+        imp::project_apply_edits(&self.inner, path, version, edits)
+    }
+
+    /// Validates and applies one document-change frame. Concurrent edits are
+    /// reported as [`Error::Stale`] and remain untouched for the plugin to
+    /// merge or surface as a conflict.
+    pub fn apply_document_change(&self, change: &DocumentChanged) -> Result<u64, Error> {
+        let document = self.document(&change.path)?;
+        let edits = change.text_edits(&document)?;
+        self.apply_document_edits(&change.path, change.base_version, &edits)
+    }
+
     /// Replaces the text of a file inside the project (absolute or
     /// root-relative), or creates it with the directories it needs, at most
     /// 16 MiB: in one step, keeping the file's encoding and BOM (a new file is
@@ -1123,6 +1189,51 @@ pub fn publish_diagnostics(path: &str, items: &[Diagnostic]) -> Result<(), Error
 /// `secrets`). `Error::Cancelled` when the call was superseded.
 pub fn fetch(request: &HttpRequest) -> Result<HttpResponse, Error> {
     imp::fetch(request)
+}
+
+/// A host-owned background WebSocket. Dropping it closes the connection.
+pub struct WebSocket {
+    id: u64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WebSocketRequest {
+    pub url: String,
+    pub headers: Vec<(String, String)>,
+    pub subprotocol: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WebSocketBatch {
+    pub messages: Vec<Vec<u8>>,
+    pub closed: bool,
+}
+
+impl WebSocket {
+    pub fn connect(request: &WebSocketRequest) -> Result<Self, Error> {
+        imp::websocket_connect(request).map(|id| Self { id })
+    }
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+    pub fn send(&self, bytes: &[u8]) -> Result<(), Error> {
+        imp::websocket_send(self.id, bytes)
+    }
+    pub fn drain(&self, limit: u32) -> Result<WebSocketBatch, Error> {
+        imp::websocket_drain(self.id, limit)
+    }
+    pub fn subscribe_document(&self, project: &Project, path: &str) -> Result<bool, Error> {
+        imp::websocket_subscribe_document(self.id, &project.inner, path)
+    }
+    pub fn unsubscribe_document(&self, project: &Project, path: &str) -> Result<bool, Error> {
+        imp::websocket_unsubscribe_document(self.id, &project.inner, path)
+    }
+}
+
+impl Drop for WebSocket {
+    fn drop(&mut self) {
+        imp::websocket_close(self.id)
+    }
 }
 
 /// Whether the user stored secret `name` (declared under `[[contributes.secrets]]`).

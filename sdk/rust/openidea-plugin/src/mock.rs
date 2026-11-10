@@ -700,6 +700,7 @@ impl Drop for MockTaskRes {
 pub mod current {
     //! The host functions, backed by the installed mock.
     use super::*;
+    use crate::host::{WebSocketBatch, WebSocketRequest};
 
     pub type InvocationRef<'a> = MockInvocation<'a>;
     pub type ProjectRes = MockProject;
@@ -1367,6 +1368,18 @@ pub mod current {
         })
     }
 
+    pub fn project_document(project: &ProjectRes, path: &str) -> Result<Document, Error> {
+        editor(|s, e| {
+            require(s, "project.read")?;
+            require(s, "editor.read")?;
+            let relative = rel_in_root(project, path)?;
+            if !e.path.ends_with(relative) {
+                return Err(Error::NotFound(format!("{path:?} is not open")));
+            }
+            Ok(Document { version: e.version, text: e.text.clone() })
+        })
+    }
+
     pub fn editor_selections(_: &EditorRes) -> Result<Vec<Range>, Error> {
         editor(|s, e| {
             require(s, "editor.read")?;
@@ -1401,6 +1414,20 @@ pub mod current {
             }
             Ok(e.version)
         })
+    }
+
+    pub fn project_apply_edits(
+        project: &ProjectRes,
+        path: &str,
+        version: u64,
+        edits: &[TextEdit],
+    ) -> Result<u64, Error> {
+        let relative = rel_in_root(project, path)?;
+        if !editor_path(&MockEditor).ends_with(relative) {
+            return Err(Error::NotFound(format!("{path:?} is not open")));
+        }
+        with(|s| require(s, "project.read"))?;
+        editor_apply(&MockEditor, version, edits)
     }
 
     pub fn open_editors() -> Result<Vec<OpenEditor>, Error> {
@@ -1649,7 +1676,7 @@ pub mod current {
     pub fn subscribe_paths(kind: &str, globs: &[&str]) -> Result<(), Error> {
         with(|s| {
             require(s, "events")?;
-            if !matches!(kind, "file-opened" | "file-saved" | "files-changed")
+            if !matches!(kind, "file-opened" | "file-saved" | "document-changed" | "files-changed")
                 || globs.len() > 64
                 || globs.iter().any(|g| {
                     let relative = g.trim_start_matches("./");
@@ -1674,6 +1701,9 @@ pub mod current {
                 "files-changed" => {
                     s.subscriptions.insert(EventKind::FilesChanged);
                 }
+                "document-changed" => {
+                    s.subscriptions.insert(EventKind::DocumentChanged);
+                }
                 _ => {}
             }
             s.path_subscriptions.insert(kind.to_owned(), globs.iter().map(|g| (*g).to_owned()).collect());
@@ -1683,6 +1713,11 @@ pub mod current {
 
     pub fn subscribe(kind: EventKind) -> Result<(), Error> {
         with(|s| {
+            if kind == EventKind::DocumentChanged {
+                return Err(Error::Invalid(
+                    "document-changed requires subscribe_paths with explicit project-relative globs".into(),
+                ));
+            }
             let cap = match kind {
                 EventKind::ActionPerformed | EventKind::InputModeChanged => Some("events.input"),
                 EventKind::Scheduled
@@ -1780,6 +1815,23 @@ pub mod current {
             }
         })
     }
+
+    pub fn websocket_connect(_req: &WebSocketRequest) -> Result<u64, Error> {
+        Err(Error::Failed("no background WebSocket in the mock".into()))
+    }
+    pub fn websocket_send(_connection: u64, _bytes: &[u8]) -> Result<(), Error> {
+        Err(Error::NotFound("WebSocket connection".into()))
+    }
+    pub fn websocket_drain(_connection: u64, _limit: u32) -> Result<WebSocketBatch, Error> {
+        Err(Error::NotFound("WebSocket connection".into()))
+    }
+    pub fn websocket_subscribe_document(_connection: u64, _project: &ProjectRes, _path: &str) -> Result<bool, Error> {
+        Err(Error::NotFound("WebSocket connection".into()))
+    }
+    pub fn websocket_unsubscribe_document(_connection: u64, _project: &ProjectRes, _path: &str) -> Result<bool, Error> {
+        Err(Error::NotFound("WebSocket connection".into()))
+    }
+    pub fn websocket_close(_connection: u64) {}
 
     pub fn secret_set(name: &str, value: &str) -> Result<(), Error> {
         with(|s| {
@@ -2307,6 +2359,9 @@ mod tests {
         host::subscribe_paths("file-saved", &["**/*.rs"]).unwrap();
         host::unsubscribe(EventKind::FileSaved);
         assert!(mock.path_subscriptions().is_empty());
+        assert!(host::subscribe(EventKind::DocumentChanged).is_err());
+        host::subscribe_paths("document-changed", &["src/**"]).unwrap();
+        assert_eq!(mock.path_subscriptions()["document-changed"], ["src/**"]);
         let _denied = MockHost::install().with_capabilities(&[]);
         assert!(matches!(host::subscribe_paths("file-opened", &[]), Err(Error::Denied(_))));
     }
@@ -2332,6 +2387,28 @@ mod tests {
         assert!(host.invocation().selected_paths().is_empty());
         host.select_paths(&["/p/a", "/p/b"]);
         assert_eq!(host.invocation().selected_paths(), ["/p/a", "/p/b"]);
+    }
+
+    #[test]
+    fn background_project_documents_are_versioned_and_reject_stale_edits() {
+        let mock = MockHost::install();
+        mock.open_editor("/project/src/main.rs", "rust", "fn main() {}", &[]);
+        let project = mock.invocation().project().unwrap();
+        let document = project.document("src/main.rs").unwrap();
+        assert_eq!((document.version, document.text.as_str()), (1, "fn main() {}"));
+        let edit = TextEdit { range: Range::new(Position::new(0, 3), Position::new(0, 7)), text: "start".into() };
+        assert_eq!(project.apply_document_edits("src/main.rs", document.version, &[edit.clone()]).unwrap(), 2);
+        assert_eq!(mock.editor_text(), "fn start() {}");
+        assert_eq!(project.apply_document_edits("src/main.rs", document.version, &[edit]), Err(Error::Stale));
+        let remote = DocumentChanged {
+            path: "src/main.rs".into(),
+            base_version: 2,
+            version: 3,
+            changes: vec![DocumentTextChange { from: 3, to: 8, insert: "main".into() }],
+        };
+        assert_eq!(project.apply_document_change(&remote).unwrap(), 3);
+        assert_eq!(mock.editor_text(), "fn main() {}");
+        assert!(matches!(project.document("src/other.rs"), Err(Error::NotFound(_))));
     }
 
     #[test]

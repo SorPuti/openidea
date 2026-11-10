@@ -65,6 +65,62 @@ pub fn resolve_in_root(root: &Path, path: &str) -> Result<PathBuf, String> {
     Ok(real)
 }
 
+/// Resolves an existing regular file that may be shared with a remote
+/// collaborator. Control directories, common secret files and every symlink
+/// component are refused, even when the link would stay inside the project.
+pub fn resolve_shared_document(root: &Path, path: &str) -> Result<PathBuf, String> {
+    resolve_shared_path(root, path, false)
+}
+
+/// The stable path used to remove a document subscription. The final file may
+/// have been deleted since it was subscribed; all parent safety checks remain.
+pub fn resolve_shared_document_identity(root: &Path, path: &str) -> Result<PathBuf, String> {
+    resolve_shared_path(root, path, true)
+}
+
+fn resolve_shared_path(root: &Path, path: &str, missing_final: bool) -> Result<PathBuf, String> {
+    let (root, joined) = joined_path(root, path)?;
+    let relative =
+        joined.strip_prefix(&root).map_err(|_| format!("{path}: access outside the project root is not allowed"))?;
+    let mut current = root.clone();
+    let component_count = relative.components().count();
+    for (index, component) in relative.components().enumerate() {
+        let std::path::Component::Normal(name) = component else {
+            return Err(format!("{path}: non-canonical document path is not allowed"));
+        };
+        let name_text = name.to_string_lossy();
+        let folded = name_text.to_ascii_lowercase();
+        if matches!(folded.as_str(), ".git" | ".hg" | ".svn" | ".openidea" | ".idea" | ".vscode") {
+            return Err(format!("{path}: IDE and version-control directories cannot be shared"));
+        }
+        current.push(name);
+        let metadata = match std::fs::symlink_metadata(&current) {
+            Ok(metadata) => metadata,
+            Err(error)
+                if missing_final && index + 1 == component_count && error.kind() == std::io::ErrorKind::NotFound =>
+            {
+                continue;
+            }
+            Err(_) => return Err(format!("{path}: no such file")),
+        };
+        if metadata.file_type().is_symlink() {
+            return Err(format!("{path}: symbolic links cannot be shared"));
+        }
+    }
+    let name = current.file_name().and_then(|name| name.to_str()).unwrap_or_default().to_ascii_lowercase();
+    let secret = name == ".env"
+        || name.starts_with(".env.")
+        || matches!(name.as_str(), ".npmrc" | ".pypirc" | ".netrc" | "id_rsa" | "id_ed25519")
+        || [".pem", ".key", ".p12", ".pfx"].iter().any(|suffix| name.ends_with(suffix));
+    if secret {
+        return Err(format!("{path}: common secret files cannot be shared"));
+    }
+    if !missing_final && !std::fs::symlink_metadata(&current).is_ok_and(|metadata| metadata.is_file()) {
+        return Err(format!("{path}: shared documents must be regular files"));
+    }
+    Ok(current)
+}
+
 /// Whether `path` (absolute, or relative to `root`) lands inside `root`,
 /// without requiring it to exist: `Ok(true)` also for a missing path, so
 /// callers distinguish "outside" from "absent". Existing symlinks are
@@ -531,6 +587,35 @@ mod tests {
         std::os::unix::fs::symlink(tmp.path(), root.join("dirlink")).unwrap();
         assert!(!inside_root(&root, "dirlink/secret.txt").unwrap());
         assert!(!inside_root(&root, "dirlink/missing.txt").unwrap());
+    }
+
+    #[test]
+    fn shared_documents_exclude_control_and_secret_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("main.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(tmp.path().join(".env.local"), "TOKEN=x\n").unwrap();
+        std::fs::create_dir(tmp.path().join(".git")).unwrap();
+        std::fs::write(tmp.path().join(".git/config"), "[core]\n").unwrap();
+
+        assert_eq!(resolve_shared_document(tmp.path(), "main.rs").unwrap(), tmp.path().join("main.rs"));
+        assert!(resolve_shared_document(tmp.path(), ".env.local").unwrap_err().contains("secret"));
+        assert!(resolve_shared_document(tmp.path(), ".git/config").unwrap_err().contains("version-control"));
+        std::fs::remove_file(tmp.path().join("main.rs")).unwrap();
+        assert_eq!(resolve_shared_document_identity(tmp.path(), "main.rs").unwrap(), tmp.path().join("main.rs"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shared_documents_never_follow_symlinks() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("real.rs"), "fn real() {}\n").unwrap();
+        std::fs::create_dir(tmp.path().join("real-dir")).unwrap();
+        std::fs::write(tmp.path().join("real-dir/nested.rs"), "fn nested() {}\n").unwrap();
+        std::os::unix::fs::symlink("real.rs", tmp.path().join("link.rs")).unwrap();
+        std::os::unix::fs::symlink("real-dir", tmp.path().join("link-dir")).unwrap();
+
+        assert!(resolve_shared_document(tmp.path(), "link.rs").unwrap_err().contains("symbolic"));
+        assert!(resolve_shared_document(tmp.path(), "link-dir/nested.rs").unwrap_err().contains("symbolic"));
     }
 
     #[test]

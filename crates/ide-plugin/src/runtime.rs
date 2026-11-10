@@ -425,6 +425,30 @@ pub trait HostApi: Send + Sync {
     fn publish_diagnostics(&self, path: &Path, items: Vec<ide_core::Diagnostic>) -> Result<(), HostError>;
     /// Performs `request` (its host is granted), filling in secret placeholders.
     fn fetch(&self, request: HttpRequest, cancel: &CancellationToken) -> Result<HttpResponse, HostError>;
+
+    fn websocket_connect(&self, request: crate::WebSocketRequest) -> Result<u64, HostError> {
+        let _ = request;
+        Err(HostError::Invalid("background WebSockets are unavailable on this host".into()))
+    }
+    fn websocket_send(&self, connection: u64, bytes: Vec<u8>) -> Result<(), HostError> {
+        let _ = (connection, bytes);
+        Err(HostError::Invalid("background WebSockets are unavailable on this host".into()))
+    }
+    fn websocket_drain(&self, connection: u64, limit: usize) -> Result<crate::WebSocketBatch, HostError> {
+        let _ = (connection, limit);
+        Err(HostError::Invalid("background WebSockets are unavailable on this host".into()))
+    }
+    fn websocket_subscribe_document(&self, connection: u64, path: &Path) -> Result<bool, HostError> {
+        let _ = (connection, path);
+        Err(HostError::Invalid("document WebSocket subscriptions are unavailable on this host".into()))
+    }
+    fn websocket_unsubscribe_document(&self, connection: u64, path: &Path) -> Result<bool, HostError> {
+        let _ = (connection, path);
+        Err(HostError::Invalid("document WebSocket subscriptions are unavailable on this host".into()))
+    }
+    fn websocket_close(&self, connection: u64) {
+        let _ = connection;
+    }
     /// The `net:ask` answer for a request to HTTPS host `host` of this plugin
     /// (`subject`): `Some(true)` allowed and remembered (a host the user
     /// already allowed connects without asking again, also in the background),
@@ -980,6 +1004,14 @@ const MAX_BATCH: usize = 1000;
 
 fn event_to_wit(e: WorkbenchEvent) -> wit_events::Event {
     match e {
+        WorkbenchEvent::DocumentChanged(value) => wit_events::Event::Other(wit_types::Extension {
+            kind: "document-changed".into(),
+            data: serde_json::to_string(&value).expect("document change serializes"),
+        }),
+        WorkbenchEvent::WebsocketReady(value) => wit_events::Event::Other(wit_types::Extension {
+            kind: "websocket-ready".into(),
+            data: serde_json::to_string(&value).expect("WebSocket ready event serializes"),
+        }),
         WorkbenchEvent::RunExited(value) => wit_events::Event::Other(wit_types::Extension {
             kind: "run-exited".into(),
             data: serde_json::to_string(&value).unwrap(),
