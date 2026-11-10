@@ -40,6 +40,9 @@ pub mod language_features;
 mod market;
 mod mcp;
 pub mod navigation;
+// Prototype only: no public socket API is exposed yet.
+#[cfg(test)]
+mod network_inbox;
 mod points;
 mod providers;
 pub mod remote;
