@@ -426,24 +426,24 @@ pub trait HostApi: Send + Sync {
     /// Performs `request` (its host is granted), filling in secret placeholders.
     fn fetch(&self, request: HttpRequest, cancel: &CancellationToken) -> Result<HttpResponse, HostError>;
 
-    fn websocket_connect(&self, request: crate::WebSocketRequest) -> Result<u64, HostError> {
-        let _ = request;
+    fn websocket_connect(&self, root: &Path, request: crate::WebSocketRequest) -> Result<u64, HostError> {
+        let _ = (root, request);
         Err(HostError::Invalid("background WebSockets are unavailable on this host".into()))
     }
-    fn websocket_send(&self, connection: u64, bytes: Vec<u8>) -> Result<(), HostError> {
-        let _ = (connection, bytes);
+    fn websocket_send(&self, root: &Path, connection: u64, bytes: Vec<u8>) -> Result<(), HostError> {
+        let _ = (root, connection, bytes);
         Err(HostError::Invalid("background WebSockets are unavailable on this host".into()))
     }
-    fn websocket_drain(&self, connection: u64, limit: usize) -> Result<crate::WebSocketBatch, HostError> {
-        let _ = (connection, limit);
+    fn websocket_drain(&self, root: &Path, connection: u64, limit: usize) -> Result<crate::WebSocketBatch, HostError> {
+        let _ = (root, connection, limit);
         Err(HostError::Invalid("background WebSockets are unavailable on this host".into()))
     }
-    fn websocket_subscribe_document(&self, connection: u64, path: &Path) -> Result<bool, HostError> {
-        let _ = (connection, path);
+    fn websocket_subscribe_document(&self, root: &Path, connection: u64, path: &Path) -> Result<bool, HostError> {
+        let _ = (root, connection, path);
         Err(HostError::Invalid("document WebSocket subscriptions are unavailable on this host".into()))
     }
-    fn websocket_unsubscribe_document(&self, connection: u64, path: &Path) -> Result<bool, HostError> {
-        let _ = (connection, path);
+    fn websocket_unsubscribe_document(&self, root: &Path, connection: u64, path: &Path) -> Result<bool, HostError> {
+        let _ = (root, connection, path);
         Err(HostError::Invalid("document WebSocket subscriptions are unavailable on this host".into()))
     }
     fn websocket_close(&self, connection: u64) {

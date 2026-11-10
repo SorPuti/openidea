@@ -37,6 +37,7 @@ pub struct PublishResult {
 
 struct Connection {
     plugin: String,
+    project: String,
     documents: Mutex<HashSet<String>>,
     outgoing: Arc<Inbox>,
     incoming: Arc<Inbox>,
@@ -66,6 +67,7 @@ impl DocumentStream {
     pub async fn connect(
         &self,
         plugin: &str,
+        project: &str,
         url: &str,
         authorization: &str,
         subprotocol: &str,
@@ -100,6 +102,7 @@ impl DocumentStream {
         let (stop, stopped) = watch::channel(false);
         let connection = Arc::new(Connection {
             plugin: plugin.to_owned(),
+            project: project.to_owned(),
             documents: Mutex::new(HashSet::new()),
             outgoing: Arc::new(Inbox::new(MAX_MESSAGES, MAX_BYTES, MAX_FRAME)),
             incoming: Arc::new(Inbox::new(MAX_MESSAGES, MAX_BYTES, MAX_FRAME)),
@@ -111,11 +114,17 @@ impl DocumentStream {
         Ok(id)
     }
 
-    pub fn subscribe(&self, plugin: &str, connection: ConnectionId, document: &str) -> Result<bool, String> {
+    pub fn subscribe(
+        &self,
+        plugin: &str,
+        project: &str,
+        connection: ConnectionId,
+        document: &str,
+    ) -> Result<bool, String> {
         if document.is_empty() || document.len() > 4096 {
             return Err("invalid document id".into());
         }
-        let connection = self.connection(plugin, connection)?;
+        let connection = self.connection(plugin, project, connection)?;
         let inserted = connection.documents.lock().insert(document.to_owned());
         if inserted {
             self.subscriptions_changed();
@@ -123,8 +132,14 @@ impl DocumentStream {
         Ok(inserted)
     }
 
-    pub fn unsubscribe(&self, plugin: &str, connection: ConnectionId, document: &str) -> Result<bool, String> {
-        let connection = self.connection(plugin, connection)?;
+    pub fn unsubscribe(
+        &self,
+        plugin: &str,
+        project: &str,
+        connection: ConnectionId,
+        document: &str,
+    ) -> Result<bool, String> {
+        let connection = self.connection(plugin, project, connection)?;
         let removed = connection.documents.lock().remove(document);
         if removed {
             self.subscriptions_changed();
@@ -163,8 +178,8 @@ impl DocumentStream {
         result
     }
 
-    pub fn send(&self, plugin: &str, connection: ConnectionId, bytes: Vec<u8>) -> Result<(), String> {
-        let connection = self.connection(plugin, connection)?;
+    pub fn send(&self, plugin: &str, project: &str, connection: ConnectionId, bytes: Vec<u8>) -> Result<(), String> {
+        let connection = self.connection(plugin, project, connection)?;
         match connection.outgoing.push(bytes) {
             Push::Wake => {
                 connection.wake.notify_one();
@@ -180,11 +195,17 @@ impl DocumentStream {
         }
     }
 
-    pub fn drain(&self, plugin: &str, connection: ConnectionId, limit: usize) -> Result<WebSocketBatch, String> {
+    pub fn drain(
+        &self,
+        plugin: &str,
+        project: &str,
+        connection: ConnectionId,
+        limit: usize,
+    ) -> Result<WebSocketBatch, String> {
         if limit == 0 || limit > DRAIN_BATCH {
             return Err("invalid drain limit".into());
         }
-        let connection_state = self.connection(plugin, connection)?;
+        let connection_state = self.connection(plugin, project, connection)?;
         let batch = connection_state.incoming.drain(limit);
         if batch.more {
             self.emit_ready(connection, plugin);
@@ -196,7 +217,14 @@ impl DocumentStream {
     }
 
     pub fn disconnect(&self, plugin: &str, id: ConnectionId) -> Result<(), String> {
-        let connection = self.connection(plugin, id)?;
+        let connection = self
+            .0
+            .connections
+            .lock()
+            .get(&id)
+            .filter(|connection| connection.plugin == plugin)
+            .cloned()
+            .ok_or_else(|| "unknown WebSocket connection".to_owned())?;
         let had_documents = !connection.documents.lock().is_empty();
         connection.outgoing.close();
         let _ = connection.stop.send(true);
@@ -231,12 +259,12 @@ impl DocumentStream {
         self.0.connections.lock().values().any(|connection| !connection.documents.lock().is_empty())
     }
 
-    fn connection(&self, plugin: &str, id: ConnectionId) -> Result<Arc<Connection>, String> {
+    fn connection(&self, plugin: &str, project: &str, id: ConnectionId) -> Result<Arc<Connection>, String> {
         self.0
             .connections
             .lock()
             .get(&id)
-            .filter(|connection| connection.plugin == plugin)
+            .filter(|connection| connection.plugin == plugin && connection.project == project)
             .cloned()
             .ok_or_else(|| "unknown WebSocket connection".into())
     }
@@ -406,13 +434,13 @@ mod tests {
     async fn document_change_reaches_only_subscribed_websocket_and_unsubscribe_stops_it() {
         let (url, server) = server().await;
         let hub = DocumentStream::default();
-        let connection = hub.connect("plugin", &url, "Bearer test", "openidea-collab.v1").await.unwrap();
-        assert!(hub.subscribe("plugin", connection, "/project/a.rs").unwrap());
-        assert!(!hub.subscribe("plugin", connection, "/project/a.rs").unwrap());
+        let connection = hub.connect("plugin", "/project", &url, "Bearer test", "openidea-collab.v1").await.unwrap();
+        assert!(hub.subscribe("plugin", "/project", connection, "/project/a.rs").unwrap());
+        assert!(!hub.subscribe("plugin", "/project", connection, "/project/a.rs").unwrap());
 
         assert_eq!(hub.publish(&change("/project/b.rs", "ignored")), PublishResult::default());
         assert_eq!(hub.publish(&change("/project/a.rs", "sent")), PublishResult { accepted: 1, rejected: 0 });
-        assert!(hub.unsubscribe("plugin", connection, "/project/a.rs").unwrap());
+        assert!(hub.unsubscribe("plugin", "/project", connection, "/project/a.rs").unwrap());
         assert_eq!(hub.publish(&change("/project/a.rs", "ignored")), PublishResult::default());
         hub.disconnect("plugin", connection).unwrap();
 
@@ -438,14 +466,14 @@ mod tests {
             socket.close(None).await.unwrap();
         });
         let hub = DocumentStream::default();
-        let connection = hub.connect("plugin", &url, "Bearer test", "openidea-collab.v1").await.unwrap();
+        let connection = hub.connect("plugin", "/project", &url, "Bearer test", "openidea-collab.v1").await.unwrap();
         server.await.unwrap();
         tokio::time::sleep(Duration::from_millis(20)).await;
         assert_eq!(
-            hub.drain("plugin", connection, 1).unwrap(),
+            hub.drain("plugin", "/project", connection, 1).unwrap(),
             WebSocketBatch { messages: vec![vec![1, 2, 3]], closed: true }
         );
-        assert!(hub.drain("plugin", connection, 1).is_err());
+        assert!(hub.drain("plugin", "/project", connection, 1).is_err());
     }
 
     #[test]
@@ -454,6 +482,7 @@ mod tests {
         let (stop, _) = watch::channel(false);
         let connection = Arc::new(Connection {
             plugin: "plugin".into(),
+            project: "/project".into(),
             documents: Mutex::new(HashSet::from(["/project/a.rs".into()])),
             outgoing: Arc::new(Inbox::new(1, MAX_BYTES, MAX_FRAME)),
             incoming: Arc::new(Inbox::new(1, MAX_BYTES, MAX_FRAME)),
@@ -462,6 +491,9 @@ mod tests {
         });
         hub.0.connections.lock().insert(1, connection.clone());
 
+        assert!(hub.send("plugin", "/other-project", 1, b"cross-project".to_vec()).is_err());
+        assert!(hub.drain("plugin", "/other-project", 1, 1).is_err());
+        assert!(hub.subscribe("plugin", "/other-project", 1, "/project/a.rs").is_err());
         assert_eq!(hub.publish(&change("/project/a.rs", "first")), PublishResult { accepted: 1, rejected: 0 });
         assert_eq!(hub.publish(&change("/project/a.rs", "second")), PublishResult { accepted: 0, rejected: 1 });
         assert_eq!(connection.outgoing.drain(1).messages.len(), 1);
@@ -481,11 +513,11 @@ mod tests {
         let (first_url, first_server) = server().await;
         let (second_url, second_server) = server().await;
         let hub = DocumentStream::default();
-        let first = hub.connect("plugin", &first_url, "Bearer test", "openidea-collab.v1").await.unwrap();
-        let second = hub.connect("plugin", &second_url, "Bearer test", "openidea-collab.v1").await.unwrap();
-        hub.subscribe("plugin", first, "/project/a.rs").unwrap();
-        hub.subscribe("plugin", first, "/project/b.rs").unwrap();
-        hub.subscribe("plugin", second, "/project/a.rs").unwrap();
+        let first = hub.connect("plugin", "/project", &first_url, "Bearer test", "openidea-collab.v1").await.unwrap();
+        let second = hub.connect("plugin", "/project", &second_url, "Bearer test", "openidea-collab.v1").await.unwrap();
+        hub.subscribe("plugin", "/project", first, "/project/a.rs").unwrap();
+        hub.subscribe("plugin", "/project", first, "/project/b.rs").unwrap();
+        hub.subscribe("plugin", "/project", second, "/project/a.rs").unwrap();
 
         assert_eq!(hub.publish(&change("/project/a.rs", "both")), PublishResult { accepted: 2, rejected: 0 });
         assert_eq!(hub.publish(&change("/project/b.rs", "first")), PublishResult { accepted: 1, rejected: 0 });
@@ -506,11 +538,11 @@ mod tests {
         let sink: Arc<dyn PluginEventSink> = Arc::new(move |_client: Option<&str>, event| captured.lock().push(event));
         let (url, server) = server().await;
         let hub = DocumentStream::new(sink);
-        let connection = hub.connect("plugin", &url, "Bearer test", "openidea-collab.v1").await.unwrap();
+        let connection = hub.connect("plugin", "/project", &url, "Bearer test", "openidea-collab.v1").await.unwrap();
 
-        assert!(hub.subscribe("plugin", connection, "/project/a.rs").unwrap());
+        assert!(hub.subscribe("plugin", "/project", connection, "/project/a.rs").unwrap());
         assert!(hub.has_subscriptions());
-        assert!(hub.unsubscribe("plugin", connection, "/project/a.rs").unwrap());
+        assert!(hub.unsubscribe("plugin", "/project", connection, "/project/a.rs").unwrap());
         assert!(!hub.has_subscriptions());
         hub.disconnect("plugin", connection).unwrap();
         server.await.unwrap();

@@ -6,7 +6,9 @@ component use `window.openidea` rather than Rust imports.
 ## Background document WebSockets
 
 `host::WebSocket` keeps a bounded, host-owned connection alive between plugin
-calls. Non-loopback endpoints must use `wss://`; the URL cannot contain
+calls. `connect`, `send` and `drain` require the same explicit `Project`, so a
+handle cannot be reused from another project. Non-loopback endpoints must use
+`wss://`; the URL cannot contain
 credentials, a query, or a fragment. Authentication is supplied through one
 `Authorization` header, whose value may contain a declared
 `{{secret:name}}`. The manifest must grant `net:<host>`, `secrets` when a

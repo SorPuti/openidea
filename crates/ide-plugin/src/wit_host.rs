@@ -1409,7 +1409,7 @@ impl net::Host for StoreData {
             .map_err(to_wit))
     }
 
-    fn websocket_connect(&mut self, req: net::WebsocketRequest) -> Fallible<u64> {
+    fn websocket_connect(&mut self, project: Resource<ProjectRes>, req: net::WebsocketRequest) -> Fallible<u64> {
         let capability = match net_capability(&req.url) {
             Ok(capability) => capability,
             Err(error) => return Ok(Err(wit::Error::Invalid(error))),
@@ -1427,17 +1427,25 @@ impl net::Host for StoreData {
             headers: req.headers.into_iter().map(|header| (header.name, header.value)).collect(),
             subprotocol: req.subprotocol,
         };
-        Ok(self.host.websocket_connect(request).map_err(to_wit))
+        let root = self.table.get(&project)?.root.clone();
+        Ok(self.host.websocket_connect(&root, request).map_err(to_wit))
     }
 
-    fn websocket_send(&mut self, connection: u64, bytes: Vec<u8>) -> Fallible<()> {
-        Ok(self.host.websocket_send(connection, bytes).map_err(to_wit))
+    fn websocket_send(&mut self, project: Resource<ProjectRes>, connection: u64, bytes: Vec<u8>) -> Fallible<()> {
+        let root = self.table.get(&project)?.root.clone();
+        Ok(self.host.websocket_send(&root, connection, bytes).map_err(to_wit))
     }
 
-    fn websocket_drain(&mut self, connection: u64, limit: u32) -> Fallible<net::WebsocketBatch> {
+    fn websocket_drain(
+        &mut self,
+        project: Resource<ProjectRes>,
+        connection: u64,
+        limit: u32,
+    ) -> Fallible<net::WebsocketBatch> {
+        let root = self.table.get(&project)?.root.clone();
         Ok(self
             .host
-            .websocket_drain(connection, limit as usize)
+            .websocket_drain(&root, connection, limit as usize)
             .map(|batch| net::WebsocketBatch { messages: batch.messages, closed: batch.closed })
             .map_err(to_wit))
     }
@@ -1463,7 +1471,7 @@ impl net::Host for StoreData {
         if self.host.document(&path).is_none() {
             return Ok(Err(wit::Error::NotFound(format!("{} is not open", path.display()))));
         }
-        Ok(self.host.websocket_subscribe_document(connection, &path).map_err(to_wit))
+        Ok(self.host.websocket_subscribe_document(&root, connection, &path).map_err(to_wit))
     }
 
     fn websocket_unsubscribe_document(
@@ -1480,7 +1488,7 @@ impl net::Host for StoreData {
             Ok(path) => path,
             Err(error) => return Ok(Err(wit::Error::Invalid(error))),
         };
-        Ok(self.host.websocket_unsubscribe_document(connection, &path).map_err(to_wit))
+        Ok(self.host.websocket_unsubscribe_document(&root, connection, &path).map_err(to_wit))
     }
 
     fn websocket_close(&mut self, connection: u64) -> wasmtime::Result<()> {

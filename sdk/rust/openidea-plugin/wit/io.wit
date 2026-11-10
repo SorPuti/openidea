@@ -88,9 +88,11 @@ interface net {
     /// Fails with `denied` for a host the plugin may not reach, `cancelled`
     /// when a newer request replaced the call or the user cancelled.
     fetch: func(req: request) -> result<response, error>;
-    websocket-connect: func(req: websocket-request) -> result<u64, error>;
-    websocket-send: func(connection: u64, bytes: list<u8>) -> result<_, error>;
-    websocket-drain: func(connection: u64, limit: u32) -> result<websocket-batch, error>;
+    /// The handle belongs to this plugin and project; another project cannot
+    /// send through or drain it.
+    websocket-connect: func(project: borrow<project>, req: websocket-request) -> result<u64, error>;
+    websocket-send: func(project: borrow<project>, connection: u64, bytes: list<u8>) -> result<_, error>;
+    websocket-drain: func(project: borrow<project>, connection: u64, limit: u32) -> result<websocket-batch, error>;
     /// Requires project.read, editor.read and events. Only an open, regular,
     /// non-secret file without symlink components can be shared.
     websocket-subscribe-document: func(connection: u64, project: borrow<project>, path: string) -> result<bool, error>;

@@ -645,7 +645,7 @@ mod imp {
             .map_err(error)
     }
 
-    pub fn websocket_connect(req: &WebSocketRequest) -> Result<u64, Error> {
+    pub fn websocket_connect(project: &ProjectRes, req: &WebSocketRequest) -> Result<u64, Error> {
         let request = wit::net::WebsocketRequest {
             url: req.url.clone(),
             headers: req
@@ -655,15 +655,15 @@ mod imp {
                 .collect(),
             subprotocol: req.subprotocol.clone(),
         };
-        wit::net::websocket_connect(&request).map_err(error)
+        wit::net::websocket_connect(project, &request).map_err(error)
     }
 
-    pub fn websocket_send(connection: u64, bytes: &[u8]) -> Result<(), Error> {
-        wit::net::websocket_send(connection, bytes).map_err(error)
+    pub fn websocket_send(project: &ProjectRes, connection: u64, bytes: &[u8]) -> Result<(), Error> {
+        wit::net::websocket_send(project, connection, bytes).map_err(error)
     }
 
-    pub fn websocket_drain(connection: u64, limit: u32) -> Result<WebSocketBatch, Error> {
-        wit::net::websocket_drain(connection, limit)
+    pub fn websocket_drain(project: &ProjectRes, connection: u64, limit: u32) -> Result<WebSocketBatch, Error> {
+        wit::net::websocket_drain(project, connection, limit)
             .map(|batch| WebSocketBatch { messages: batch.messages, closed: batch.closed })
             .map_err(error)
     }
@@ -1210,17 +1210,17 @@ pub struct WebSocketBatch {
 }
 
 impl WebSocket {
-    pub fn connect(request: &WebSocketRequest) -> Result<Self, Error> {
-        imp::websocket_connect(request).map(|id| Self { id })
+    pub fn connect(project: &Project, request: &WebSocketRequest) -> Result<Self, Error> {
+        imp::websocket_connect(&project.inner, request).map(|id| Self { id })
     }
     pub fn id(&self) -> u64 {
         self.id
     }
-    pub fn send(&self, bytes: &[u8]) -> Result<(), Error> {
-        imp::websocket_send(self.id, bytes)
+    pub fn send(&self, project: &Project, bytes: &[u8]) -> Result<(), Error> {
+        imp::websocket_send(&project.inner, self.id, bytes)
     }
-    pub fn drain(&self, limit: u32) -> Result<WebSocketBatch, Error> {
-        imp::websocket_drain(self.id, limit)
+    pub fn drain(&self, project: &Project, limit: u32) -> Result<WebSocketBatch, Error> {
+        imp::websocket_drain(&project.inner, self.id, limit)
     }
     pub fn subscribe_document(&self, project: &Project, path: &str) -> Result<bool, Error> {
         imp::websocket_subscribe_document(self.id, &project.inner, path)

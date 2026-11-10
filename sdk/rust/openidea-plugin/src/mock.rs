@@ -1816,13 +1816,13 @@ pub mod current {
         })
     }
 
-    pub fn websocket_connect(_req: &WebSocketRequest) -> Result<u64, Error> {
+    pub fn websocket_connect(_project: &ProjectRes, _req: &WebSocketRequest) -> Result<u64, Error> {
         Err(Error::Failed("no background WebSocket in the mock".into()))
     }
-    pub fn websocket_send(_connection: u64, _bytes: &[u8]) -> Result<(), Error> {
+    pub fn websocket_send(_project: &ProjectRes, _connection: u64, _bytes: &[u8]) -> Result<(), Error> {
         Err(Error::NotFound("WebSocket connection".into()))
     }
-    pub fn websocket_drain(_connection: u64, _limit: u32) -> Result<WebSocketBatch, Error> {
+    pub fn websocket_drain(_project: &ProjectRes, _connection: u64, _limit: u32) -> Result<WebSocketBatch, Error> {
         Err(Error::NotFound("WebSocket connection".into()))
     }
     pub fn websocket_subscribe_document(_connection: u64, _project: &ProjectRes, _path: &str) -> Result<bool, Error> {

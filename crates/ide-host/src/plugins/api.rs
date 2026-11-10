@@ -2253,7 +2253,7 @@ impl HostApi for PluginApi {
         })
     }
 
-    fn websocket_connect(&self, request: ide_plugin::WebSocketRequest) -> Result<u64, HostError> {
+    fn websocket_connect(&self, root: &Path, request: ide_plugin::WebSocketRequest) -> Result<u64, HostError> {
         let secrets = self.shared.secrets.read().clone();
         let plugin = self.id().to_owned();
         let mut authorization = None;
@@ -2270,24 +2270,41 @@ impl HostApi for PluginApi {
         let authorization =
             authorization.ok_or_else(|| HostError::Invalid("WebSocket authorization is required".into()))?;
         net_runtime()
-            .block_on(self.shared.document_stream.connect(&plugin, &request.url, &authorization, &request.subprotocol))
+            .block_on(self.shared.document_stream.connect(
+                &plugin,
+                &to_ipc(root),
+                &request.url,
+                &authorization,
+                &request.subprotocol,
+            ))
             .map_err(HostError::Failed)
     }
 
-    fn websocket_send(&self, connection: u64, bytes: Vec<u8>) -> Result<(), HostError> {
-        self.shared.document_stream.send(self.id(), connection, bytes).map_err(HostError::Failed)
+    fn websocket_send(&self, root: &Path, connection: u64, bytes: Vec<u8>) -> Result<(), HostError> {
+        self.shared.document_stream.send(self.id(), &to_ipc(root), connection, bytes).map_err(HostError::Failed)
     }
 
-    fn websocket_drain(&self, connection: u64, limit: usize) -> Result<ide_plugin::WebSocketBatch, HostError> {
-        self.shared.document_stream.drain(self.id(), connection, limit).map_err(HostError::Invalid)
+    fn websocket_drain(
+        &self,
+        root: &Path,
+        connection: u64,
+        limit: usize,
+    ) -> Result<ide_plugin::WebSocketBatch, HostError> {
+        self.shared.document_stream.drain(self.id(), &to_ipc(root), connection, limit).map_err(HostError::Invalid)
     }
 
-    fn websocket_subscribe_document(&self, connection: u64, path: &Path) -> Result<bool, HostError> {
-        self.shared.document_stream.subscribe(self.id(), connection, &to_ipc(path)).map_err(HostError::Invalid)
+    fn websocket_subscribe_document(&self, root: &Path, connection: u64, path: &Path) -> Result<bool, HostError> {
+        self.shared
+            .document_stream
+            .subscribe(self.id(), &to_ipc(root), connection, &to_ipc(path))
+            .map_err(HostError::Invalid)
     }
 
-    fn websocket_unsubscribe_document(&self, connection: u64, path: &Path) -> Result<bool, HostError> {
-        self.shared.document_stream.unsubscribe(self.id(), connection, &to_ipc(path)).map_err(HostError::Invalid)
+    fn websocket_unsubscribe_document(&self, root: &Path, connection: u64, path: &Path) -> Result<bool, HostError> {
+        self.shared
+            .document_stream
+            .unsubscribe(self.id(), &to_ipc(root), connection, &to_ipc(path))
+            .map_err(HostError::Invalid)
     }
 
     fn websocket_close(&self, connection: u64) {
