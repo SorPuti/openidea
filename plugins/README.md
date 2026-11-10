@@ -928,6 +928,13 @@ final `closed` state. Queue overflow rejects the new frame and closes the
 connection instead of reporting delivery or growing memory. Subscriptions are
 removed on unsubscribe, disconnect, plugin stop or transport failure.
 
+Native plugin tests use the same `WebSocket` wrapper with `MockHost`. Inspect
+opened connections and outbound frames with `websockets`, queue an inbound
+binary frame with `push_websocket_message`, and finish the peer side with
+`close_websocket`. The mock expands declared secret placeholders, enforces the
+network grant and project binding, records document subscriptions, and reports
+the final close only after queued frames have drained.
+
 Provider calls can use `host::project_of(&doc.path)` (`workspace.project-of`)
 without an invocation project or enumerating every open project. It returns the
 deepest open project containing the absolute path, or `None` outside open roots.
